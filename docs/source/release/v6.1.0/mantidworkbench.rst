@@ -7,6 +7,7 @@ Mantid Workbench Changes
 
 New and Improved
 ----------------
+Added Floating/On Top setting for all the windows that are opened by workbench (plots, interfaces, etc.)
 
 Bugfixes
 --------
