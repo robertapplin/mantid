@@ -170,8 +170,6 @@ int FunctionMultiDomainPresenter::getCurrentDataset() const {
 }
 
 void FunctionMultiDomainPresenter::setCurrentDataset(int index) {
-  if (!m_model->hasFunction())
-    return;
   m_model->setCurrentDomainIndex(index);
   updateViewFromModel();
 }
