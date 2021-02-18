@@ -125,7 +125,7 @@ def parse_spectrum_indices(workspace, spectrum_numbers):
     @return list of workspace indices, ready to be used in mantid algorithms such as CropWorkspace
     """
     segments = [s.split("-") for s in spectrum_numbers.split(",")]
-    indices = [idx for s in segments for idx in range(int(s[0]), int(s[-1])+1)]
+    indices = [idx for s in segments for idx in range(int(s[0]), int(s[-1]) + 1)]
     # remove duplicates and sort
     indices = sorted(set(indices))
     max_index = workspace.getNumberHistograms()
@@ -351,8 +351,8 @@ def sum_spectra(parent, ws):
     return alg.getProperty('OutputWorkspace').value
 
 
-def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bank_names=None, ceria_run=241391, vanadium_run=236516,
-                                  template_file=None):
+def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bk2bk_params=None, bank_names=None, ceria_run=241391,
+                                  vanadium_run=236516, template_file=None):
     """
     Produces and writes an ENGIN-X instrument parameter file for GSAS
     (in the GSAS iparam format, as partially described in the GSAS
@@ -369,6 +369,8 @@ def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bank_names=Non
                    (as produced by EnggCalibrate)
     @param tzero :: list of TZERO values, one per bank, to pass on to GSAS
                     (also from EnggCalibrate)
+    @param bk2bk_params :: list of BackToBackExponential parameters from
+                        Parameters.xml file, one per bank, to pass on to GSAS
     @param bank_names :: Names of each bank to be added to the file
     @param ceria_run :: number of the ceria (CeO2) run used for this calibration.
                         this number goes in the file and should also be used to
@@ -393,11 +395,17 @@ def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bank_names=Non
         template_file = 'template_ENGINX_241391_236516_North_and_South_banks.prm'
     import os
     template_file = os.path.join(os.path.dirname(__file__), template_file)
+
     if not bank_names:
         bank_names = ["North", "South"]
 
     with open(template_file) as tf:
         output_lines = tf.readlines()
+
+    gamma_0_gamma_1 = []
+    for i in range(len(output_lines)):
+        if output_lines[i][6:12] == "PRCF12":  # preserve the last two values on this line
+            gamma_0_gamma_1 += [output_lines[i][45:-2]]
 
     def replace_patterns(line, patterns, replacements):
         """
@@ -410,9 +418,11 @@ def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bank_names=Non
 
         return line
 
-    # need to replace two types of lines/patterns:
+    # need to replace these types of lines/patterns:
     # - instrument constants/parameters (ICONS)
     # - instrument calibration comment with run numbers (CALIB)
+    # - .his file name for open genie (INCBM)
+    # - BackToBackExponential parameters (PRCF11+12)
     for b_idx, _bank_name in enumerate(bank_names):
         patterns = ["INS  %d ICONS" % (b_idx + 1),  # bank calibration parameters: DIFC, DIFA, TZERO
                     "INS    CALIB",  # calibration run numbers (Vanadium and Ceria)
@@ -425,6 +435,35 @@ def write_ENGINX_GSAS_iparam_file(output_file, difa, difc, tzero, bank_names=Non
                          format(ceria_run, vanadium_run)).ljust(80) + '\n',
                         ("INS    INCBM  ob+mon_{0}_North_and_South_banks.his".
                          format(ceria_run)).ljust(80) + '\n']
+
+        if bk2bk_params:  # template params not overwritten if none provided
+
+            patterns += ["INS  {}PRCF11".format(b_idx + 1), "INS  {}PRCF12".format(b_idx + 1)]
+
+            if len(gamma_0_gamma_1) == 0:  # set gamma_0 and gamma_1 if not properly read from the parameter file
+                if _bank_name == "North":
+                    gamma_0_gamma_1_val = "0.000000E+00   0.514723E+01 "
+                elif _bank_name == "South":
+                    gamma_0_gamma_1_val = "0.000000E+00   0.652544E+01 "
+                else:
+                    gamma_0_gamma_1_val = "0.000000E+00   0.000000E+00 "
+            else:  # if correctly read from parameter file
+                gamma_0_gamma_1_val = gamma_0_gamma_1[b_idx]
+
+            replacements += [("INS  {0}PRCF11   {1:.6E}   {2:.6E}   {3:.6E}   {4:.6E}".
+                              format(b_idx + 1,
+                                     bk2bk_params[b_idx][0],  # alpha
+                                     bk2bk_params[b_idx][1],  # beta_0
+                                     bk2bk_params[b_idx][2],  # beta_1
+                                     bk2bk_params[b_idx][3]   # sigma_0_sq
+                                     )).ljust(80) + '\n',
+                             ("INS  {0}PRCF12   {1:.6E}   {2:.6E}   {3}".
+                              format(b_idx + 1,
+                                     bk2bk_params[b_idx][4],  # sigma_1_sq
+                                     bk2bk_params[b_idx][5],  # sigma_2_sq
+                                     gamma_0_gamma_1_val  # preserve gamma_0 and gamma_1 from input template
+                                     )).ljust(80) + '\n'
+                             ]
 
         output_lines = [replace_patterns(line, patterns, replacements) for line in output_lines]
 
