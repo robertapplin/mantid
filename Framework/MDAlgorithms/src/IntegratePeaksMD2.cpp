@@ -956,7 +956,7 @@ void IntegratePeaksMD2::findEllipsoid(
     const CoordTransform &getRadiusSq, const V3D &pos,
     const coord_t &radiusSquared, const bool &qAxisIsFixed,
     const double &bgDensity, std::vector<V3D> &eigenvects,
-    std::vector<double> &eigenvals, V3D &mean) {
+    std::vector<double> &eigenvals, V3D &mean, size_t depth, size_t max_depth) {
 
   // add events in sphere to a new MD workspace
   MDEventWorkspace<MDE, nd>::sptr peakRegionMD = ws->cloneEmpty();
@@ -1095,12 +1095,10 @@ void IntegratePeaksMD2::findEllipsoid(
       eigenvals.begin(), eigenvals.end(), [&](auto x) { return x < 1e-6; },
       1e-6);
   // populate V3D vector of eigenvects (needed for ellipsoid shape)
-  for (size_t ivect = 0; ivect < cov_mat.numRows(); ++ivect) {
-    eigenvects.push_back(V3D(Evec[0][ivect], Evec[1][ivect], Evec[2][ivect]));
+  eigenvects = std::vector<V3D>(nd);
+  for (size_t ivect = 0; ivect < nd; ++ivect) {
+    eigenvects[ivect] = V3D(Evec[0][ivect], Evec[1][ivect], Evec[2][ivect]);
   }
-  // calculate determinant of covar (product of eigenvalues)
-  auto covar_det = std::accumulate(eigenvals.begin(), eigenvals.end(), 1,
-                                   std::multiplies<double>());
 
   //// calc covariance recursively? mask events that aren't within certain criteria
   //Matrix<double> cov_mat;
@@ -1113,8 +1111,10 @@ void IntegratePeaksMD2::findEllipsoid(
 
   // binMD along Eigenvectors
   // get args for input
+  double max_var = 0.0;
   std::vector<double> vars(nd, 0.0);
   for (size_t ivec = 0; ivec < nd; ++ivec) {
+    max_var = std::max(max_var, eigenvals[ivec]);
     auto alg = this->createChildAlgorithm("BinMD");
     alg->initialize();
     alg->setProperty("InputWorkspace", ws); // peakRegionMD
@@ -1168,7 +1168,34 @@ void IntegratePeaksMD2::findEllipsoid(
     auto stdev = area / ((height-minNonZero) * std::sqrt(2 * M_PI));
     vars[ivec] = stdev * stdev;
   }
-  eigenvals = vars;
+
+  // check if eigenvals better - if so make new transform and run again
+  // calculate determinant of covar (product of eigenvalues)
+  auto covar_det = std::accumulate(eigenvals.begin(), eigenvals.end(), 1,
+                                   std::multiplies<double>());
+  auto new_covar_det = std::accumulate(vars.begin(), vars.end(), 1,
+                                   std::multiplies<double>());
+  if (new_covar_det < 0.9 * covar_det) {
+    
+  }
+
+  if ((depth < max_depth) || new_covar_det > 0.9*covar_det) {
+    eigenvals = vars;
+    // make new transform
+    bool dimensionsUsed[3] = {true, true, true};
+    coord_t center[nd];
+    for (size_t d = 0; d < nd; ++d) {
+      center[d] = static_cast<coord_t>(mean[d]);
+    }
+    CoordTransformDistance new_getRadiusSq(nd, center, dimensionsUsed,
+                                           1, /* outD */
+                                           eigenvects, eigenvals);
+    V3D new_pos(mean);
+    IntegratePeaksMD2::findEllipsoid<MDE,nd>(ws, new_getRadiusSq, new_pos, 9 * max_var,
+                                     qAxisIsFixed, bgDensity, eigenvects,
+                                     eigenvals, mean, depth + 1);
+  }
+
 }
 
 //  // sample subset of h events from total n
