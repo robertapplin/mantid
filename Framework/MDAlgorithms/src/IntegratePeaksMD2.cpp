@@ -1010,12 +1010,14 @@ void IntegratePeaksMD2::findEllipsoid(
                                (box->getInverseVolume()));
         // For each event
         for (const auto &evnt : events) {
-          std::vector<coord_t> center(nd);
+
+          coord_t center_array[nd];
           for (size_t d = 0; d < nd; ++d) {
-            center[d] = evnt.getCenter(d);
+            center_array[d] = evnt.getCenter(d);
           }
-          coord_t out[nd];
-          getRadiusSq.apply(center.data(), out);
+          coord_t out[1];
+          auto *cen_ptr = center_array; // pointer to first element
+          getRadiusSq.apply(cen_ptr, out);
 
           if (evnt.getSignal() > bg && out[0] < radiusSquared) {
             // Create the event
@@ -1026,10 +1028,8 @@ void IntegratePeaksMD2::findEllipsoid(
             // Add it to the workspace
             peakRegionMD->addEvent(newEvent);
 
-            V3D center(
-                evnt.getCenter(0), evnt.getCenter(1),
-                evnt.getCenter(
-                    2)); // prbs better as vector - keep mean as V3D though
+            // convert data type of center for following maths
+            std::vector<double> center(cen_ptr, cen_ptr + nd);
             const auto signal = evnt.getSignal();
 
             w_sum += signal;
