@@ -5,6 +5,7 @@
 #   Institut Laue - Langevin & CSNS, Institute of High Energy Physics, CAS
 # SPDX - License - Identifier: GPL - 3.0 +
 #  This file is part of the mantid workbench.
+import builtins
 import atexit
 import importlib
 import os
@@ -15,6 +16,7 @@ from functools import partial
 from mantid.api import FrameworkManagerImpl
 from mantid.kernel import ConfigService, UsageService, version_str as mantid_version_str
 from mantidqt.utils.qt import plugins
+from mantidqt.utils.qt.qappthreadcall import QAppThreadCall
 
 # Find Qt plugins for development builds on some platforms
 plugins.setup_library_paths()
@@ -28,6 +30,7 @@ from workbench.app.resources import qCleanupResources  # noqa
 from workbench.config import APPNAME, ORG_DOMAIN, ORGANIZATION  # noqa
 from workbench.plugins.exception_handler import exception_logger  # noqa
 from workbench.widgets.about.presenter import AboutPresenter  # noqa
+from workbench.utils.io import input_qinputdialog
 
 # Constants
 SYSCHECK_INTERVAL = 50
@@ -124,6 +127,9 @@ def start_workbench(app, command_line_options):
     main_window.set_splash('Preloading matplotlib')
     from workbench.plotting.config import initialize_matplotlib  # noqa
     initialize_matplotlib()
+
+    # Replace python input with a call to a qinputdialog
+    builtins.input = QAppThreadCall(input_qinputdialog)
 
     # Setup widget layouts etc. mantid.simple cannot be used before this
     # or the log messages don't get through to the widget
