@@ -130,6 +130,9 @@ void IntegratePeaksMD2::init() {
   declareProperty("UseCentroid", false,
                   "Perform integration on estimated centroid not peak position "
                   "(ignored if all three peak radii are specified).");
+  declareProperty("MaxIterations", 1,
+                  "Iterations is covariance estimation (ignored if all three "
+                  "peak radii are specified).");
 
   declareProperty("Cylinder", false,
                   "Default is sphere.  Use next five parameters for cylinder.");
@@ -302,6 +305,7 @@ void IntegratePeaksMD2::integrate(typename MDEventWorkspace<MDE, nd>::sptr ws) {
   bool qAxisIsFixed = getProperty("FixQAxis");
   bool majorAxisLengthFixed = getProperty("FixMajorAxisLength");
   bool useCentroid = getProperty("UseCentroid");
+  int maxCovarIter = getProperty("MaxIterations");
   /// Cylinder Length to use around peaks for cylinder
   double cylinderLength = getProperty("CylinderLength");
   Workspace2D_sptr wsProfile2D, wsFit2D, wsDiff2D;
@@ -519,8 +523,8 @@ void IntegratePeaksMD2::integrate(typename MDEventWorkspace<MDE, nd>::sptr ws) {
           findEllipsoid<MDE, nd>(
               ws, getRadiusSq, pos,
               static_cast<coord_t>(pow(PeakRadiusVector[i], 2)), qAxisIsFixed,
-              bgDensity, eigenvects, eigenvals, mean);
-          if (majorAxisLengthFixed) {
+              bgDensity, eigenvects, eigenvals, mean, maxCovarIter);
+          if (!majorAxisLengthFixed) {
             // replace radius for this peak with 3*stdev along major axis
             auto max_stdev =
                 sqrt(*std::max_element(eigenvals.begin(), eigenvals.end()));
@@ -956,7 +960,7 @@ void IntegratePeaksMD2::findEllipsoid(
     const CoordTransform &getRadiusSq, const V3D &pos,
     const coord_t &radiusSquared, const bool &qAxisIsFixed,
     const double &bgDensity, std::vector<V3D> &eigenvects,
-    std::vector<double> &eigenvals, V3D &mean, size_t depth, size_t max_depth) {
+    std::vector<double> &eigenvals, V3D &mean, int max_depth) {
 
   // get leaf-only iterators over all boxes in ws
   auto function = std::make_unique<Geometry::MDAlgorithms::MDBoxMaskFunction>(
@@ -974,7 +978,7 @@ void IntegratePeaksMD2::findEllipsoid(
       // simple check whether box is defintely not contained
       coord_t boxCenter[nd];
       box->getCenter(boxCenter);
-      V3D displacement; // vector between peak pos and box center
+      V3D displacement;   // vector between peak pos and box center
       coord_t rboxSq = 0; // dist from center to vertex sq
       for (size_t d = 0; d < nd; ++d) {
         auto dim = box->getExtents(d);
@@ -1002,8 +1006,7 @@ void IntegratePeaksMD2::findEllipsoid(
           if (evnt.getSignal() > bg && out[0] < radiusSquared) {
             // make center vector for following maths
             std::vector<double> center(cen_ptr, cen_ptr + nd);
-            const auto signal = evnt.getSignal();
-            peak_events.push_back(std::pair(center, signal));
+            peak_events.push_back(std::pair(center, evnt.getSignal() - bg));
           }
         }
       }
@@ -1011,25 +1014,61 @@ void IntegratePeaksMD2::findEllipsoid(
     box->releaseEvents();
   } while (MDiter.next());
 
-  calcCovar(peak_events, pos, qAxisIsFixed, eigenvects, eigenvals, mean);
-  //// calc covariance recursively? mask events that aren't within certain criteria
-  //Matrix<double> cov_mat;
-  //calcCovar(peakRegionMD, pos, qAxisIsFixed, eigenvects, eigenvals, mean,
-  //          cov_mat);
+  calcCovar(peak_events, pos, qAxisIsFixed, eigenvects, eigenvals, mean,
+            max_depth);
 
-  // either redefine coord transform and run recursively (using radisu = 2 stdev)
-  // maybe make masking function for mah dist < 90% chisq?
-  // do MCD (i.e. select lowest h mah dist events)
 }
-
 
 void IntegratePeaksMD2::calcCovar(
     const std::vector<std::pair<std::vector<double>, double>> &peak_events,
     const V3D &pos, const bool &qAxisIsFixed, std::vector<V3D> &eigenvects,
-    std::vector<double> &eigenvals, V3D &mean, const Matrix<double> &prev_cov_mat) {
+    std::vector<double> &eigenvals, V3D &mean, const int &maxIter,
+    const int &nIter, const Matrix<double> &prev_cov_mat) {
+
+  size_t nd = peak_events[0].first.size();
+
+  auto h = peak_events.size();
+  std::vector<size_t> idx(h);
+  iota(idx.begin(), idx.end(), 0);
+  Matrix<double> invCov;
+  double prev_cov_det = DBL_MAX;
+  if (prev_cov_mat.numRows() == nd) {
+    prev_cov_det = prev_cov_mat.determinant();
+    invCov = Matrix<double>(prev_cov_mat);
+    invCov.Invert();
+    // get chi-squared boost function
+    boost::math::chi_squared chisq(nd);
+    std::vector<double> mdsq(h);
+    for (size_t ievent = 0; ievent < h; ievent++) {
+      // calculate the mah dist using old covar and mean
+      const auto event = peak_events[ievent];
+      const auto displ =
+          V3D(event.first[0], event.first[1], event.first[2]) - mean;
+      const auto tmp = invCov * displ;
+      mdsq[ievent] = tmp.scalar_prod(displ);
+      if (mdsq[ievent] > boost::math::quantile(chisq, 0.975)) {
+        // exclude if outside 3 stdevs
+        mdsq[ievent] = DBL_MAX;
+      }
+      //else {
+      //  // weight by counts
+      //  mdsq[ievent] = mdsq[ievent] / event.second;
+      //}
+    }
+    // only want h events with smallest mah dist
+    // nd*(nd+1) is min num points
+    h = std::max( (h + nd + 1) / 2, nd * (nd + 1));
+    if (h > peak_events.size()) {
+      // have already calculated covar from all points
+      return;
+    }
+    // perform partial sort
+    std::partial_sort(
+        idx.begin(), idx.begin() + h, idx.end(),
+        [&mdsq](size_t i1, size_t i2) { return mdsq[i1] < mdsq[i2]; });
+  }
 
   // initialise matrices etc. to hold running totals
-  size_t nd = peak_events[0].first.size();
   Matrix<double> cov_mat(nd, nd);
   Matrix<double> Pinv(nd, nd);
   if (qAxisIsFixed) {
@@ -1044,8 +1083,8 @@ void IntegratePeaksMD2::calcCovar(
   mean = V3D();          // clear whatever was passed
   double w_sum = 0.0;    // sum of weights
 
-
-  for (const auto &event : peak_events) {
+  for (size_t ievent = 0; ievent < h; ievent++) {
+    const auto event = peak_events[idx[ievent]];
     auto center = event.first;
     const auto signal = event.second;
 
@@ -1091,7 +1130,7 @@ void IntegratePeaksMD2::calcCovar(
   Matrix<double> Eval; // hold eigenvals in diag
   cov_mat.Diagonalise(Evec, Eval);
   eigenvals = Eval.Diagonal();
-
+  // transform results back into MD frame
   if (qAxisIsFixed) {
     // insert variance along Q (first eigenvector)
     eigenvals.insert(eigenvals.begin(), var_Qhat / w_sum);
@@ -1116,6 +1155,16 @@ void IntegratePeaksMD2::calcCovar(
     // transfrom translation back to QLab
     mean = P * mean;
   }
+
+  auto cov_det = std::accumulate(eigenvals.begin(), eigenvals.end(), 1.0,
+                                 std::multiplies<double>());
+  
+  if ((nIter < maxIter) && ( abs(cov_det-prev_cov_det) > 0.05 * prev_cov_det)) {
+    V3D new_pos(mean);
+    calcCovar(peak_events, new_pos, qAxisIsFixed, eigenvects, eigenvals, mean,
+              maxIter, nIter + 1, cov_mat);
+  }
+
   // set min eigenval to be small but non-zero (1e-6)
   // when no discernible peak above background
   std::replace_if(
@@ -1126,308 +1175,8 @@ void IntegratePeaksMD2::calcCovar(
   for (size_t ivect = 0; ivect < nd; ++ivect) {
     eigenvects[ivect] = V3D(Evec[0][ivect], Evec[1][ivect], Evec[2][ivect]);
   }
-  // if dpoing anther iteration...
 }
-//
-//  Matrix<double> Pinv(nd, nd);
-//  if (qAxisIsFixed) {
-//    // 2D covar in plane perp to Q (uhat,vhat basis)
-//    cov_mat = Matrix<double>(nd-1, nd-1);
-//    // transformation from Qlab to Qhat, vhat and uhat,
-//    getPinv(pos, Pinv);
-//  } else {
-//    cov_mat = Matrix<double>(nd, nd);
-//  }
-//  double var_Qhat = 0.0; //  variance parallel to Q (used if fix Q axis)
-//  mean = V3D();          // clear whatever was passed
-//  double w_sum = 0.0;    // sum of weights
-//
-//  // loop over all boxes inside radius
-//  // get leaf-only iterators over all boxes in ws
-//  MDBoxBase<MDE, nd> *baseBox = ws->getBox();
-//  MDBoxIterator<MDE, nd> MDiter(baseBox, 1000, true);
-//  // get initial vector of events inside sphere (parrallise?)
-//  std::vector<std::pair<V3D, double>> event_list;
-//  do {
-//    auto *box = dynamic_cast<MDBox<MDE, nd> *>(MDiter.getBox());
-//    if (box && !box->getIsMasked()) {
-//      const std::vector<MDE> &events = box->getConstEvents();
-//      for (const auto &evnt : events) {
-//        V3D center(evnt.getCenter(0), evnt.getCenter(1), evnt.getCenter(2));
-//        const auto signal = evnt.getSignal();
-//
-//        w_sum += signal;
-//
-//        if (qAxisIsFixed) {
-//          // transform coords to Q, uhat, vhat basis
-//          // use V3D for matrix algebra
-//          center = Pinv * center;
-//        }
-//
-//        // update mean
-//        for (size_t d = 0; d < nd; ++d) {
-//          mean[d] += (signal / w_sum) * (center[d] - mean[d]);
-//        }
-//
-//        if (qAxisIsFixed) {
-//          // get variance along Q
-//          var_Qhat += signal * pow((center[0] - mean[0]), 2);
-//        }
-//        for (size_t row = 0; row < cov_mat.numRows(); ++row) {
-//          for (size_t col = 0; col < cov_mat.numRows(); ++col) {
-//            // symmeteric matrix
-//            if (row <= col) {
-//              double cov = 0.0;
-//              if (!qAxisIsFixed) {
-//                cov = signal * (center[row] - mean[row]) *
-//                      (center[col] - mean[col]);
-//              } else {
-//                cov = signal * (center[row + 1] - mean[row + 1]) *
-//                      (center[col + 1] - mean[col + 1]);
-//              }
-//              if (row == col) {
-//                cov_mat[row][col] += cov;
-//              } else {
-//                cov_mat[row][col] += cov;
-//                cov_mat[col][row] += cov;
-//              }
-//            }
-//          }
-//        }
-//      }
-//    }
-//    box->releaseEvents();
-//  } while (MDiter.next());
-//  // normalise the covariance matrix
-//  cov_mat /= w_sum;                // normalise by sum of weights
-//  Matrix<double> Evec;             // hold eigenvectors
-//  Matrix<double> Eval;             // hold eigenvals in diag
-//  cov_mat.Diagonalise(Evec, Eval);
-//  eigenvals = Eval.Diagonal();
-//
-//  if (qAxisIsFixed) {
-//    // convert results back to Qlab
-//    Eval = Matrix<double>(3, 3, true); // identity
-//    // insert variance along Q (first eigenvector)
-//    eigenvals.insert(eigenvals.begin(), var_Qhat / w_sum);
-//    Eval = Eval * eigenvals;
-//    // get eigenvectors in transformed basis (Qhat,uhat,vhat)
-//    std::vector<double> tmp = {1.0, 0.0,         0.0,
-//                               0.0, *Evec[0, 0], *Evec[0, 1],
-//                               0.0, *Evec[1, 0], *Evec[1, 1]};
-//    Evec = Matrix<double>(tmp);
-//    // transform back to Qlab
-//    Matrix<double> P(Pinv);
-//    P.Transpose(); 
-//    Evec = P * Evec;
-//    // make 3 x 3 covar mat = Evect * Eval * Evect.T
-//    Matrix<double> Evec_T(Evec);
-//    Evec_T.Transpose();
-//    cov_mat = Evec * Eval * Evec_T; // now a 3 x 3 matrix in Qlab
-//    // transfrom translation back to QLab
-//    mean = P * mean;
-//  }
-//  // set min eigenval to be small but non-zero (1e-6)
-//  // when no discernible peak above background
-//  std::replace_if(
-//      eigenvals.begin(), eigenvals.end(), [&](auto x) { return x < 1e-6; },
-//      1e-6);
-//  // populate V3D vector of eigenvects (needed for ellipsoid shape)
-//  for (size_t ivect = 0; ivect < cov_mat.numRows(); ++ivect) {
-//    eigenvects.push_back(V3D(Evec[0][ivect], Evec[1][ivect], Evec[2][ivect]));
-//  }
-//  // calculate determinant of covar (product of eigenvalues)
-//  auto covar_det = std::accumulate(eigenvals.begin(), eigenvals.end(), 1,
-//                                   std::multiplies<double>());
-//}
 
-//// evaluate the mahobanalis distance
-//void IntegratePeaksMD2::calcMahalanobisDist(
-//    const std::vector<const std::pair<V3D, double>> &event_list, const V3D &mean, const Matrix<double> &invCov, const size_t &h, std::vector<size_t> sortedIndices) {
-//
-//  // get indices of unsorted event list - no do this in loop!
-//  sortedIndices = std::vector<size_t>(event_list.size());
-//  std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
-//  std::vector<double> md(0.0, event_list.size());
-//  for (const auto &evnt : event_list) {
-//    auto displacement = evnt.first - mean;
-//    auto tmp = invCov * displacement;
-//    md = displacement * tmp;
-//  }
-//  std::partial_sort(indices.begin(), indices.end(),
-//                    [&](int A, int B) -> bool { return Score[A] < Score[B]; });
-//}
-
-
-///**
-// * Calculate the covariance matrix of a spherical region and store the
-// * eigenvectors and eigenvalues that diagonalise the covariance matrix in the
-// * vectors provided
-// *
-// *  @param ws             input workspace
-// *  @param getRadiusSq    Coord transfrom for sphere
-// *  @param pos            V3D of peak centre
-// *  @param radiusSquared  radius that defines spherical region for
-// covarariance
-// *  @param qAxisIsFixed      bool to fix an eigenvector along direction pos
-// *  @param bgDensity      background counts per unit volume
-// *  @param eigenvects     eigenvectors of covariance matrix of spherical
-// region
-// *  @param eigenvals      eigenvectors of covariance matrix of spherical
-// region
-// *  @param translation    container to hold translation of peak pos to
-// centroid
-// */
-// template <typename MDE, size_t nd>
-// void IntegratePeaksMD2::findEllipsoid(
-//    typename MDEventWorkspace<MDE, nd>::sptr ws,
-//    const CoordTransform &getRadiusSq, const V3D &pos,
-//    const coord_t &radiusSquared, const bool &qAxisIsFixed,
-//    const double &bgDensity, std::vector<V3D> &eigenvects,
-//    std::vector<double> &eigenvals, V3D &translation) {
-//  double w_sum = 0.0;  // sum of weights
-//  Matrix<double> Evec; // hold eigenvectors
-//  Matrix<double> Eval; // hold eigenvals in diag
-//  // get leaf-only iterators over all boxes in ws
-//  auto function = std::make_unique<Geometry::MDAlgorithms::MDBoxMaskFunction>(
-//      pos, radiusSquared);
-//  MDBoxBase<MDE, nd> *baseBox = ws->getBox();
-//  MDBoxIterator<MDE, nd> MDiter(baseBox, 1000, true, function.get());
-//
-//  Matrix<double> cov_mat;
-//  Matrix<double> Pinv(3, 3);
-//  if (qAxisIsFixed) {
-//    // 2D covar in plane perp to Q (uhat,vhat basis)
-//    cov_mat = Matrix<double>(2, 2);
-//    // transformation from Qlab to Qhat, vhat and uhat,
-//    getPinv(pos, Pinv);
-//  } else {
-//    cov_mat = Matrix<double>(3, 3);
-//  }
-//  std::vector<double> mean(3, 0.0);
-//  double var_Qhat = 0.0; //  variance parallel to Q (used if fix Q axis)
-//
-//  boost::math::chi_squared chisq(nd);
-//
-//  // loop over all boxes inside radius
-//  do {
-//    auto *box = dynamic_cast<MDBox<MDE, nd> *>(MDiter.getBox());
-//    if (box && !box->getIsMasked()) {
-//      const std::vector<MDE> &events = box->getConstEvents();
-//      auto bg = bgDensity / (static_cast<double>(events.size()) *
-//                             (box->getInverseVolume()));
-//      // For each event
-//      for (const auto &evnt : events) {
-//        std::vector<coord_t> center(nd);
-//        for (size_t d = 0; d < nd; ++d) {
-//          center[d] = evnt.getCenter(d);
-//        }
-//        coord_t out[nd];
-//        getRadiusSq.apply(center.data(), out);
-//
-//        if (evnt.getSignal() > bg && out[0] < radiusSquared) {
-//          auto signal = (evnt.getSignal() - bg);
-//
-//          if (qAxisIsFixed) {
-//            // transform coords to Q, uhat, vhat basis
-//            // use V3D for matrix algebra
-//            auto tmp = Pinv * V3D(static_cast<double>(center[0]),
-//                                  static_cast<double>(center[1]),
-//                                  static_cast<double>(center[2]));
-//            for (size_t d = 0; d < center.size(); ++d) {
-//              center[d] = static_cast<coord_t>(tmp[d]);
-//            }
-//          }
-//
-//          // evaluate the mahobanalis distance
-//          std::vector<double> cen = {static_cast<double>(center[0]),
-//                                     static_cast<double>(center[1]),
-//                                     static_cast<double>(center[2])};
-//          Matrix<double> invCov(cov_mat);
-//          invCov.Invert();
-//          auto tmp = invCov * cen;
-//          double mdsq = 0.0;
-//          for (size_t n = 0; n < nd; n++) {
-//            mdsq += cen[n] * tmp[n];
-//          }
-//          if (isfinite(mdsq)) {
-//            auto p = static_cast<float>(boost::math::cdf(chisq, sqrt(mdsq)));
-//            if (p > 0.95) {
-//              continue;
-//            }
-//          }
-//
-//          w_sum += signal;
-//
-//          // update mean
-//          for (size_t d = 0; d < mean.size(); ++d) {
-//            mean[d] += (signal / w_sum) * (center[d] - mean[d]);
-//          }
-//
-//          if (qAxisIsFixed) {
-//            // get variance along Q
-//            var_Qhat += signal * pow((center[0] - mean[0]), 2);
-//          }
-//          for (size_t row = 0; row < cov_mat.numRows(); ++row) {
-//            for (size_t col = 0; col < cov_mat.numRows(); ++col) {
-//              // symmeteric matrix
-//              if (row <= col) {
-//                double cov = 0.0;
-//                if (!qAxisIsFixed) {
-//                  cov = signal * (center[row] - mean[row]) *
-//                        (center[col] - mean[col]);
-//                } else {
-//                  cov = signal * (center[row + 1] - mean[row + 1]) *
-//                        (center[col + 1] - mean[col + 1]);
-//                }
-//                if (row == col) {
-//                  cov_mat[row][col] += cov;
-//                } else {
-//                  cov_mat[row][col] += cov;
-//                  cov_mat[col][row] += cov;
-//                }
-//              }
-//            }
-//          }
-//        }
-//      }
-//    }
-//    box->releaseEvents();
-//  } while (MDiter.next());
-//  // normalise the covariance matrix
-//  cov_mat /= w_sum;                // normalise by sum of weights
-//  cov_mat.Diagonalise(Evec, Eval); // 3 x 3 matrices
-//  eigenvals = Eval.Diagonal();
-//  if (qAxisIsFixed) {
-//    // insert variance along Q (first eigenvector)
-//    eigenvals.insert(eigenvals.begin(), var_Qhat / w_sum);
-//    eigenvects.push_back(pos / pos.norm());
-//  }
-//  // set min eigenval to be small but non-zero (1e-6)
-//  // when no discernible peak above background
-//  std::replace_if(
-//      eigenvals.begin(), eigenvals.end(), [&](auto x) { return x < 1e-6; },
-//      1e-6);
-//  // populate rest of eigenvect/vals
-//  for (size_t ivect = 0; ivect < cov_mat.numRows(); ++ivect) {
-//    if (!qAxisIsFixed) {
-//      eigenvects.push_back(V3D(Evec[0][ivect], Evec[1][ivect],
-//      Evec[2][ivect]));
-//    } else {
-//      // transform back to Qlab basis
-//      eigenvects.push_back(V3D(0.0, 0.0, 0.0));
-//      for (size_t ibasis = 0; ibasis < Evec.numRows(); ++ibasis) {
-//        eigenvects.back() +=
-//            V3D(Pinv[ibasis + 1][0], Pinv[ibasis + 1][1], Pinv[ibasis + 1][2])
-//            * Evec[ibasis][ivect];
-//      }
-//    }
-//  }
-//  // calculate translation from pos to centroid (mean)
-//  for (size_t d = 0; d < mean.size(); ++d) {
-//    translation[d] += mean[d] - pos[d];
-//  }
-//}
 
 /**
  * Get the inverse of the matrix P. Left multiply a vector by Pinv to transform
