@@ -553,8 +553,8 @@ void LoadILLDiffraction::fillStaticInstrumentScan(const NXUInt &data,
   const std::vector<double> axis = getAxis(scan);
   const std::vector<double> monitor = getMonitor(scan);
 
-  int monitorIndex = 0;
-  int startIndex = NUMBER_MONITORS;
+  size_t monitorIndex = 0;
+  size_t startIndex = NUMBER_MONITORS;
   if (m_instName == "IN5" || m_instName == "PANTHER") {
     startIndex = 0;
     monitorIndex = m_numberDetectorsActual;
