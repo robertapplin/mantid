@@ -346,8 +346,7 @@ void FunctionMultiDomainPresenter::setColumnSizes(int s0, int s1, int s2) {
 }
 
 void FunctionMultiDomainPresenter::setStretchLastColumn(bool stretch) {
-  auto treeView = dynamic_cast<FunctionTreeView *>(m_view);
-  if (treeView)
+  if (auto treeView = dynamic_cast<FunctionTreeView *>(m_view))
     treeView->setStretchLastColumn(stretch);
 }
 
