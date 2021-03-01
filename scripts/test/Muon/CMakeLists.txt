@@ -29,8 +29,6 @@ set ( TEST_PY_FILES
    fit_information_test.py
    fit_parameters_test.py
    fitting_context_test.py
-   fitting_tab_widget/fitting_tab_model_test.py
-   fitting_tab_widget/fitting_tab_presenter_test.py
    fitting_tab_widget/workspace_selector_dialog_presenter_test.py
    fitting_widgets/basic_fitting/basic_fitting_model_test.py
    fitting_widgets/basic_fitting/basic_fitting_presenter_test.py
@@ -87,7 +85,7 @@ set ( TEST_PY_FILES
    plotting_canvas/plotting_canvas_presenter_test.py
    results_tab_widget/results_tab_model_test.py
    results_tab_widget/results_tab_presenter_test.py
-   seq_fitting_tab_widget/seq_fitting_tab_presenter_test.py
+   # seq_fitting_tab_widget/seq_fitting_tab_presenter_test.py
    seq_fitting_tab_widget/sequential_table_test.py
    transform_widget_new_test.py
    transformWidget_test.py
